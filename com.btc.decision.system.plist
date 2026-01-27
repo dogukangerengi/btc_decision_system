@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.btc.decision.system</string>
+    
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/dogukangerengi/btc_decision_system/venv/bin/python</string>
+        <string>/Users/dogukangerengi/btc_decision_system/src/main.py</string>
+    </array>
+    
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    
+    <key>WorkingDirectory</key>
+    <string>/Users/dogukangerengi/btc_decision_system/src</string>
+    
+    <key>StandardOutPath</key>
+    <string>/Users/dogukangerengi/btc_decision_system/logs/stdout.log</string>
+    
+    <key>StandardErrorPath</key>
+    <string>/Users/dogukangerengi/btc_decision_system/logs/stderr.log</string>
+    
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/dogukangerengi/btc_decision_system/venv/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>PYTHONPATH</key>
+        <string>/Users/dogukangerengi/btc_decision_system/src</string>
+    </dict>
+    
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

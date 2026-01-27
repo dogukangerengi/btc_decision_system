@@ -1,0 +1,74 @@
+# =============================================================================
+# BTC DİNAMİK KARAR DESTEK SİSTEMİ - BAĞIMLILIKLAR
+# =============================================================================
+# Kurulum: pip install -r requirements.txt
+# Not: M4 Macbook Air için optimize edilmiştir
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# VERİ İŞLEME VE ANALİZ
+# -----------------------------------------------------------------------------
+pandas>=2.2.0              # Zaman serisi veri yapıları ve manipülasyonu
+numpy>=1.26.0              # Sayısal hesaplamalar ve matris operasyonları
+scipy>=1.12.0              # İstatistiksel testler (t-test, p-value, korelasyon)
+
+# -----------------------------------------------------------------------------
+# TEKNİK ANALİZ İNDİKATÖRLERİ
+# -----------------------------------------------------------------------------
+pandas-ta>=0.3.14b         # 130+ teknik indikatör (TA-Lib alternatifi, pip ile kolay kurulum)
+# Not: TA-Lib M4'te kurulumu zor olabilir, pandas-ta daha pratik
+
+# -----------------------------------------------------------------------------
+# MAKİNE ÖĞRENME VE İSTATİSTİKSEL MODELLEME
+# -----------------------------------------------------------------------------
+scikit-learn>=1.4.0        # Feature selection, cross-validation, metrikler
+statsmodels>=0.14.0        # Zaman serisi analizi, ADF testi, regresyon
+
+# -----------------------------------------------------------------------------
+# KRİPTO VERİ KAYNAKLARI (API)
+# -----------------------------------------------------------------------------
+ccxt>=4.2.0                # 100+ kripto borsasından veri çekme (Binance, Bybit vb.)
+websocket-client>=1.7.0    # Gerçek zamanlı WebSocket bağlantıları
+
+# -----------------------------------------------------------------------------
+# BİLDİRİM SİSTEMİ
+# -----------------------------------------------------------------------------
+python-telegram-bot>=21.0  # Telegram Bot API (async destekli)
+
+# -----------------------------------------------------------------------------
+# YAPILANDIRMA VE ORTAM DEĞİŞKENLERİ
+# -----------------------------------------------------------------------------
+python-dotenv>=1.0.0       # .env dosyasından API anahtarlarını okuma
+pyyaml>=6.0.1              # YAML yapılandırma dosyaları
+
+# -----------------------------------------------------------------------------
+# LOGLAMA VE HATA TAKİBİ
+# -----------------------------------------------------------------------------
+loguru>=0.7.2              # Gelişmiş loglama (standart logging'den daha pratik)
+
+# -----------------------------------------------------------------------------
+# ZAMANLAMA (SCHEDULER)
+# -----------------------------------------------------------------------------
+schedule>=1.2.1            # Periyodik görev çalıştırma (saatlik analiz için)
+apscheduler>=3.10.4        # Gelişmiş zamanlayıcı (cron-like)
+
+# -----------------------------------------------------------------------------
+# GELİŞTİRME ARAÇLARI
+# -----------------------------------------------------------------------------
+pytest>=8.0.0              # Birim testleri
+black>=24.0.0              # Kod formatlama
+isort>=5.13.0              # Import sıralama
+mypy>=1.8.0                # Tip kontrolü (opsiyonel ama önerilir)
+
+# -----------------------------------------------------------------------------
+# JUPYTER NOTEBOOK (KEŞİFSEL ANALİZ İÇİN)
+# -----------------------------------------------------------------------------
+jupyter>=1.0.0             # Notebook ortamı
+matplotlib>=3.8.0          # Grafik çizimi
+seaborn>=0.13.0            # İstatistiksel görselleştirme
+plotly>=5.18.0             # İnteraktif grafikler
+
+# -----------------------------------------------------------------------------
+# PERFORMANS OPTİMİZASYONU (M4 İÇİN)
+# -----------------------------------------------------------------------------
+numba>=0.59.0              # JIT derleme ile hızlandırma (opsiyonel)

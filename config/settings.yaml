@@ -1,0 +1,102 @@
+# =============================================================================
+# BTC KARAR DESTEK SİSTEMİ - GENEL AYARLAR
+# =============================================================================
+# Bu dosya sistemin ana yapılandırma parametrelerini içerir.
+# Değişiklikler restart gerektirmez, runtime'da okunabilir.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# GENEL SİSTEM AYARLARI
+# -----------------------------------------------------------------------------
+system:
+  name: "BTC Decision Support System"      # Sistem adı (loglarda görünür)
+  version: "0.1.0"                          # Semantik versiyon
+  environment: "development"                # development | production
+  timezone: "UTC"                           # Tüm zaman damgaları UTC'de
+
+# -----------------------------------------------------------------------------
+# ANALİZ AYARLARI
+# -----------------------------------------------------------------------------
+analysis:
+  interval_seconds: 3600                    # Analiz sıklığı (3600 = 1 saat)
+  lookback_days: 30                         # Backtest için geriye bakış süresi
+  min_data_points: 500                      # Minimum gerekli veri noktası sayısı
+  
+# -----------------------------------------------------------------------------
+# ZAMAN DİLİMLERİ (TIMEFRAMES)
+# -----------------------------------------------------------------------------
+# Sistem bu timeframe'leri tarayarak optimal olanı seçer
+timeframes:
+  available:                                # Mevcut timeframe'ler
+    - "15m"                                 # 15 dakika
+    - "30m"                                 # 30 dakika
+    - "1h"                                  # 1 saat
+    - "2h"                                  # 2 saat
+    - "4h"                                  # 4 saat
+    - "1d"                                  # 1 gün
+  default: "1h"                             # Varsayılan timeframe
+
+# -----------------------------------------------------------------------------
+# VERİ KAYNAĞI AYARLARI
+# -----------------------------------------------------------------------------
+data:
+  exchange: "binance"                       # Varsayılan borsa (ccxt formatı)
+  symbol: "BTC/USDT"                        # İşlem çifti
+  fallback_exchanges:                       # Yedek borsalar (sırasıyla denenecek)
+    - "bybit"
+    - "okx"
+  
+# -----------------------------------------------------------------------------
+# İSTATİSTİKSEL EŞİKLER
+# -----------------------------------------------------------------------------
+# Bu değerler istatistiksel anlamlılık için kullanılır
+thresholds:
+  # P-value: Bonferroni düzeltmeli anlamlılık seviyesi
+  # Formül: 0.05 / (test_sayısı), burada varsayılan α = 0.05
+  p_value: 0.05
+  
+  # Information Coefficient (IC): Tahmin ile gerçek getiri arasındaki Spearman korelasyonu
+  # IC > 0.03 genellikle anlamlı kabul edilir (finans literatürü standardı)
+  min_ic: 0.03
+  
+  # IC t-stat: IC'nin istatistiksel anlamlılığı için t-değeri
+  # |t| > 2 yaklaşık p < 0.05'e karşılık gelir
+  min_ic_tstat: 2.0
+  
+  # Sharpe Ratio: Risk-adjusted return (annualize edilmiş)
+  # Sharpe > 0.5 kabul edilebilir, > 1.0 iyi, > 2.0 çok iyi
+  min_sharpe: 0.5
+  
+  # Sortino Ratio: Sadece downside volatiliteyi dikkate alır
+  # Genellikle Sharpe'dan yüksek olur, > 1.0 tercih edilir
+  min_sortino: 0.7
+  
+  # Maximum Drawdown: Kabul edilebilir maksimum değer kaybı oranı
+  # %20'nin altında tutulması önerilir
+  max_drawdown: 0.20
+  
+  # Win Rate: Minimum kazanan işlem oranı
+  # %50'nin üzerinde olması tercih edilir
+  min_win_rate: 0.50
+  
+  # Güven Skoru: Raporda gösterilecek minimum güven
+  min_confidence_score: 0.60
+
+# -----------------------------------------------------------------------------
+# LOGLAMA AYARLARI
+# -----------------------------------------------------------------------------
+logging:
+  level: "INFO"                             # DEBUG | INFO | WARNING | ERROR
+  format: "{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}"
+  rotation: "10 MB"                         # Log dosyası boyut limiti
+  retention: "7 days"                       # Log saklama süresi
+  file: "logs/btc_decision.log"             # Log dosyası yolu
+
+# -----------------------------------------------------------------------------
+# TELEGRAM AYARLARI
+# -----------------------------------------------------------------------------
+telegram:
+  enabled: true                             # Telegram bildirimlerini aç/kapa
+  send_on_startup: true                     # Başlangıçta test mesajı gönder
+  error_notifications: true                 # Hata durumunda bildirim gönder
+  # Token ve Chat ID .env dosyasından okunur (güvenlik için)
