@@ -564,7 +564,10 @@ class TelegramNotifier:
 
     def send_chart_sync(self, photo_file, caption: str = "") -> bool:
         """Senkron grafik gönderme wrapper'ı."""
-        return asyncio.run(self.send_chart(photo_file, caption))
+        try:
+            return asyncio.run(self.send_chart(photo_file, caption))
+        finally:
+            self._bot = None  # <--- BU SATIR KRİTİK (Hata düzeltici)
     
     # =========================================================================
     # SENKRON WRAPPER'LAR
@@ -576,7 +579,10 @@ class TelegramNotifier:
     
     def send_report_sync(self, report: AnalysisReport, silent: bool = False) -> bool:
         """Senkron rapor gönderme wrapper'ı."""
-        return asyncio.run(self.send_analysis_report(report, silent))
+        try:
+            return asyncio.run(self.send_analysis_report(report, silent))
+        finally:
+            self._bot = None  # <--- BU SATIR KRİTİK (Hata düzeltici)
     
     def send_alert_sync(
         self,
