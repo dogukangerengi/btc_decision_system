@@ -65,6 +65,7 @@ from calculator import IndicatorCalculator
 from selector import IndicatorSelector, IndicatorScore
 from backtester import DynamicBacktester, BacktestResult, TimeframeRanking
 from telegram_notifier import TelegramNotifier, AnalysisReport
+from utils.plotter import AnalysisPlotter
 
 # =============================================================================
 # LOGGİNG AYARLARI
@@ -162,6 +163,7 @@ class BTCDecisionSystem:
             verbose=False
         )
         self.notifier = TelegramNotifier()
+        self.plotter = AnalysisPlotter()
         
         # Sonuçlar
         self.data_dict: Dict[str, pd.DataFrame] = {}
@@ -555,14 +557,7 @@ class BTCDecisionSystem:
     # =========================================================================
     
     def send_notification(self, report: AnalysisReport) -> bool:
-        """
-        Telegram bildirimi gönderir.
-        
-        Returns:
-        -------
-        bool
-            Başarılı ise True
-        """
+        """Telegram bildirimi (Metin + Grafik) gönderir."""
         logger.info("\n" + "=" * 60)
         logger.info("ADIM 6: TELEGRAM BİLDİRİMİ")
         logger.info("=" * 60)
@@ -573,26 +568,44 @@ class BTCDecisionSystem:
         
         if not self.notifier.is_configured():
             logger.warning("  Telegram yapılandırılmamış (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)")
-            # Mesajı console'a yazdır
-            print("\n" + "-" * 50)
-            print("TELEGRAM MESAJI (yapılandırılmadığı için gönderilmedi):")
-            print("-" * 50)
-            import re
-            msg = self.notifier.format_analysis_report(report)
-            clean_msg = re.sub(r'<[^>]+>', '', msg)
-            print(clean_msg)
-            print("-" * 50)
             return True
         
         try:
-            success = self.notifier.send_report_sync(report)
-            if success:
-                logger.info("  ✓ Telegram bildirimi gönderildi")
-            else:
-                logger.error("  ✗ Telegram bildirimi gönderilemedi")
-            return success
+            # 1. Önce Metin Raporunu Gönder
+            self.notifier.send_report_sync(report)
+            
+            # 2. Grafiği Oluştur ve Gönder
+            tf = report.recommended_timeframe
+            if tf in self.data_dict:
+                df = self.data_dict[tf]
+                
+                # Sadece aktif indikatör isimlerini düz liste yap
+                flat_indicators = {}
+                for cat, inds in report.active_indicators.items():
+                    flat_indicators[cat] = inds
+
+                # Grafiği çiz
+                logger.info(f"  📊 {tf} için grafik oluşturuluyor...")
+                
+                # Plotter ile resmi oluştur
+                image_buf = self.plotter.create_analysis_chart(
+                    df, 
+                    report.symbol, 
+                    tf, 
+                    flat_indicators
+                )
+                
+                # Resmi gönder (Yeni senkron metod ile)
+                self.notifier.send_chart_sync(
+                    photo_file=image_buf, 
+                    caption=f"📊 {report.symbol} - {tf} Grafik Analizi"
+                )
+                logger.info("  📸 Grafik gönderildi")
+
+            return True
+            
         except Exception as e:
-            logger.error(f"  ✗ Telegram hatası: {e}")
+            logger.error(f"  ✗ Bildirim hatası: {e}")
             return False
     
     # =========================================================================
@@ -737,18 +750,28 @@ def run_scheduler(system: BTCDecisionSystem, interval_minutes: int = 60):
 # ANA GİRİŞ NOKTASI
 # =============================================================================
 
+# src/main.py dosyasının en altındaki main fonksiyonunu bununla değiştir:
+
 def main():
     """Ana giriş noktası."""
     
     parser = argparse.ArgumentParser(
-        description='BTC Dinamik Karar Destek Sistemi',
+        description='Kripto Dinamik Karar Destek Sistemi', # İsmi güncelledik
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Örnekler:
-  python main.py              # Tek seferlik analiz
-  python main.py --schedule   # Saatlik sürekli çalışma
-  python main.py --interval 30  # 30 dakikada bir
+  python main.py --symbol ETH/USDT  # ETH analizi yap
+  python main.py --symbol SOL/USDT --no-telegram # SOL analizi yap, bildirim gönderme
+  python main.py --schedule --interval 30 # Varsayılan (BTC) ile 30 dk'da bir çalış
         """
+    )
+    
+    # YENİ EKLENEN KISIM: Sembol argümanı
+    parser.add_argument(
+        '--symbol', 
+        type=str, 
+        default='BTC/USDT',
+        help='Analiz edilecek işlem çifti (Örn: ETH/USDT, SOL/USDT)'
     )
     
     parser.add_argument(
@@ -774,6 +797,11 @@ def main():
     
     # Yapılandırma
     config = Config()
+    
+    # YENİ EKLENEN KISIM: Config'i argümanla güncelleme
+    # Kullanıcı terminalden ne girdiyse (örn: ETH/USDT), config'i eziyoruz.
+    config.SYMBOL = args.symbol.upper() 
+    
     if args.no_telegram:
         config.TELEGRAM_ENABLED = False
     

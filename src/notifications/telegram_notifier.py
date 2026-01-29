@@ -541,6 +541,31 @@ class TelegramNotifier:
         formatted = self.format_simple_alert(title, message, alert_type)
         return await self.send_message(formatted)
     
+    async def send_chart(self, photo_file, caption: str = "") -> bool:
+        """Grafik/Resim gönderir (async)."""
+        if not self.is_configured():
+            return False
+        
+        try:
+            # Dosya imlecini başa al (önlem olarak)
+            if hasattr(photo_file, 'seek'):
+                photo_file.seek(0)
+                
+            await self.bot.send_photo(
+                chat_id=self.chat_id,
+                photo=photo_file,
+                caption=caption,
+                parse_mode=self.parse_mode
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Grafik gönderme hatası: {e}")
+            return False
+
+    def send_chart_sync(self, photo_file, caption: str = "") -> bool:
+        """Senkron grafik gönderme wrapper'ı."""
+        return asyncio.run(self.send_chart(photo_file, caption))
+    
     # =========================================================================
     # SENKRON WRAPPER'LAR
     # =========================================================================
