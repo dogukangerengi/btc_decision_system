@@ -403,6 +403,10 @@ class BTCDecisionSystem:
         """
         Analiz raporu oluşturur.
         
+        IC Bazlı Yaklaşım:
+        - Güven skoru: Anlamlı IC'lerin ortalaması ve tutarlılığı
+        - Risk metrikleri yerine IC değerleri gösterilir
+        
         Returns:
         -------
         AnalysisReport
@@ -412,30 +416,20 @@ class BTCDecisionSystem:
         logger.info("ADIM 5: RAPOR OLUŞTURMA")
         logger.info("=" * 60)
         
-        # En iyi TF'nin backtest sonucu
+        # En iyi TF
         best_tf = self.timeframe_ranking.best_timeframe
-        best_result = next(
-            (r for r in self.backtest_results if r.timeframe == best_tf),
-            None
-        )
         
         # Sinyal yönü belirleme
         direction = self._determine_direction(best_tf)
         
-        # Aktif indikatörler (kategorilere göre)
-        active_indicators = self._get_active_indicators(best_tf)
+        # Aktif indikatörler ve IC değerleri
+        active_indicators, indicator_details = self._get_active_indicators_with_ic(best_tf)
         
-        # Risk metrikleri
-        risk_metrics = {}
-        if best_result:
-            risk_metrics = {
-                'sharpe': best_result.sharpe_ratio,
-                'max_dd': best_result.max_drawdown,
-                'win_rate': best_result.win_rate
-            }
+        # IC bazlı güven skoru hesapla
+        confidence = self._calculate_ic_confidence(best_tf)
         
-        # Notlar
-        notes = self._generate_notes(best_result)
+        # Notlar (IC bazlı)
+        notes = self._generate_notes_ic_based(best_tf)
         
         # Rapor oluştur
         report = AnalysisReport(
@@ -444,111 +438,288 @@ class BTCDecisionSystem:
             recommended_timeframe=best_tf,
             market_regime=self.timeframe_ranking.market_regime,
             direction=direction,
-            confidence_score=self.timeframe_ranking.confidence,
+            confidence_score=confidence,
             active_indicators=active_indicators,
-            risk_metrics=risk_metrics,
+            indicator_details=indicator_details,
             notes=notes
         )
         
         logger.info(f"  ✓ Rapor oluşturuldu")
-        logger.info(f"  📊 TF: {best_tf} | Yön: {direction} | Güven: {report.confidence_score:.0f}")
+        logger.info(f"  📊 TF: {best_tf} | Yön: {direction} | Güven: {confidence:.0f}")
         
         return report
     
-    def _determine_direction(self, timeframe: str) -> str:
-        """Sinyal yönünü belirler."""
+    def _calculate_ic_confidence(self, timeframe: str) -> float:
+        """
+        IC bazlı güven skoru hesaplar.
         
+        Faktörler:
+        - Anlamlı indikatör sayısı (daha fazla = daha güvenilir)
+        - Ortalama |IC| (daha yüksek = daha güçlü sinyal)
+        - IC tutarlılığı (aynı yönde mi?)
+        - Piyasa rejimi (ranging/volatile ise düşür)
+        
+        Returns:
+        -------
+        float
+            0-100 arası güven skoru
+        """
         if timeframe not in self.indicator_scores:
-            return "NEUTRAL"
+            return 50.0
         
         scores = self.indicator_scores[timeframe]
         
-        # Trend kategorisindeki anlamlı indikatörlerin IC ortalaması
-        trend_scores = [s for s in scores if s.category == 'trend' and s.is_significant]
-        
-        if not trend_scores:
-            # Tüm anlamlı indikatörlerin IC ortalaması
-            significant_scores = [s for s in scores if s.is_significant]
-            if significant_scores:
-                avg_ic = np.mean([s.ic_mean for s in significant_scores])
-            else:
-                return "NEUTRAL"
-        else:
-            avg_ic = np.mean([s.ic_mean for s in trend_scores])
-        
-        # IC > 0.05: LONG, IC < -0.05: SHORT, else NEUTRAL
-        if avg_ic > 0.05:
-            return "LONG"
-        elif avg_ic < -0.05:
-            return "SHORT"
-        else:
-            return "NEUTRAL"
-    
-    def _get_active_indicators(self, timeframe: str) -> Dict[str, List[str]]:
-        """
-        Aktif indikatörleri kategorilere göre döndürür.
-        Her kategoriden en yüksek IC'ye sahip max 2 indikatör.
-        """
-        
-        active = {}
-        
-        if timeframe not in self.indicator_scores:
-            return active
-        
-        scores = self.indicator_scores[timeframe]
-        
-        # Sadece ana kategoriler (other hariç)
+        # Sadece ana kategorilerdeki anlamlı indikatörler
         valid_categories = ['trend', 'momentum', 'volatility', 'volume']
+        significant = [s for s in scores 
+                      if abs(s.ic_mean) > 0.02 
+                      and not np.isnan(s.ic_mean)
+                      and s.category in valid_categories]
         
-        # Her kategori için skorları grupla
+        if not significant:
+            return 40.0
+        
+        # 1. Anlamlı indikatör sayısı katkısı (max 30 puan)
+        n_significant = len(significant)
+        count_score = min(n_significant / 20 * 30, 30)
+        
+        # 2. Ortalama |IC| katkısı (max 40 puan)
+        avg_ic = np.mean([abs(s.ic_mean) for s in significant])
+        ic_score = min((avg_ic - 0.02) / 0.08 * 40, 40)
+        ic_score = max(ic_score, 0)
+        
+        # 3. IC tutarlılığı katkısı (max 30 puan)
+        positive_ic = sum(1 for s in significant if s.ic_mean > 0)
+        negative_ic = sum(1 for s in significant if s.ic_mean < 0)
+        
+        if n_significant > 0:
+            consistency = max(positive_ic, negative_ic) / n_significant
+            consistency_score = consistency * 30
+        else:
+            consistency_score = 15
+        
+        # Toplam (ham skor)
+        total = count_score + ic_score + consistency_score
+        
+        # 4. PİYASA REJİMİ AYARLAMASI
+        # Ranging veya volatile piyasada sinyal güvenilirliği düşer
+        if self.timeframe_ranking:
+            regime = self.timeframe_ranking.market_regime
+            
+            if regime == 'ranging':
+                # Yatay piyasada trend sinyalleri güvenilir değil
+                total *= 0.75  # %25 düşür
+            elif regime == 'volatile':
+                # Volatil piyasada her sinyal riskli
+                total *= 0.70  # %30 düşür
+            elif regime == 'transitioning':
+                # Geçiş döneminde belirsizlik var
+                total *= 0.85  # %15 düşür
+            # trending_up veya trending_down ise ayarlama yok
+        
+        return min(max(total, 0), 100)
+    
+    def _get_active_indicators_with_ic(self, timeframe: str) -> Tuple[Dict[str, List[str]], Dict[str, float]]:
+        """
+        Aktif indikatörleri ve IC değerlerini döndürür.
+        
+        Özellikler:
+        - Her kategoriden max 2 FARKLI indikatör
+        - Aynı grubun farklı çıktıları filtrelenir (AROON, MACD, BB, vb.)
+        - EN GÜÇLÜ IC'ye sahip indikatör HER ZAMAN dahil edilir
+        
+        Returns:
+        -------
+        Tuple[Dict[str, List[str]], Dict[str, float]]
+            (kategori→indikatörler, indikatör→IC)
+        """
+        active = {}
+        ic_details = {}
+        
+        if timeframe not in self.indicator_scores:
+            return active, ic_details
+        
+        scores = self.indicator_scores[timeframe]
+        valid_categories = ['trend', 'momentum', 'volatility', 'volume']
         category_scores = {cat: [] for cat in valid_categories}
         
-        for score in scores:
-            # Kategori kontrolü
-            cat = score.category.lower() if score.category else 'other'
+        # Aynı grubun farklı çıktılarını grupla
+        def get_base_indicator(name: str) -> str:
+            """İndikatörün ana adını döndürür (duplicate önleme için)."""
+            groups = {
+                'AROON': ['AROONU', 'AROOND', 'AROONOSC'],
+                'STOCH': ['STOCHRSIk', 'STOCHRSId', 'STOCHk', 'STOCHd'],
+                'MACD': ['MACDh', 'MACDs', 'MACD_'],
+                'PPO': ['PPOh', 'PPOs', 'PPO_'],
+                'TSI': ['TSIs', 'TSI_'],
+                'BB': ['BBU_', 'BBM_', 'BBL_', 'BBB_', 'BBP_'],
+                'KC': ['KCUe', 'KCBe', 'KCLe'],
+                'DC': ['DCU_', 'DCM_', 'DCL_'],
+                'PSAR': ['PSARl', 'PSARs'],
+                'SUPERTREND': ['SUPERTs', 'SUPERTl', 'SUPERTd', 'SUPERT_'],
+                'ICHIMOKU': ['ITS_', 'IKS_', 'ISA_', 'ISB_', 'ICS_'],
+                'DI': ['DMP_', 'DMN_'],
+                'VORTEX': ['VTXP', 'VTXN'],
+                'FISHER': ['FISHERTs', 'FISHERT'],
+                'RVI': ['RVIs', 'RVI_'],
+                'QQE': ['QQEl', 'QQEs', 'QQE_'],
+                'COPC': ['COPC'],  # Coppock
+            }
             
-            # Sadece valid kategorileri al
+            for group_name, patterns in groups.items():
+                for pattern in patterns:
+                    if name.startswith(pattern):
+                        return group_name
+            
+            return name.split('_')[0]
+        
+        # Tüm anlamlı indikatörleri topla ve kategorilere ayır
+        all_significant = []
+        for score in scores:
+            cat = score.category.lower() if score.category else 'other'
             if cat not in valid_categories:
                 continue
-            
-            # Anlamlı IC kontrolü
             if abs(score.ic_mean) > 0.02 and not np.isnan(score.ic_mean):
                 category_scores[cat].append(score)
+                all_significant.append(score)
         
-        # Her kategoriden en iyi 2'yi seç (|IC| bazında)
+        # EN GÜÇLÜ indikatörü bul (tüm kategoriler dahil)
+        top_indicator = None
+        if all_significant:
+            top_indicator = max(all_significant, key=lambda x: abs(x.ic_mean))
+        
+        # Her kategoriden seç
         for cat in valid_categories:
-            if category_scores[cat]:
-                # IC mutlak değerine göre sırala
-                sorted_scores = sorted(
-                    category_scores[cat], 
-                    key=lambda x: abs(x.ic_mean), 
-                    reverse=True
-                )
-                # Max 2 indikatör
-                active[cat] = [s.name for s in sorted_scores[:2]]
+            if not category_scores[cat]:
+                continue
+            
+            sorted_scores = sorted(
+                category_scores[cat], 
+                key=lambda x: abs(x.ic_mean), 
+                reverse=True
+            )
+            
+            # Unique gruplardan seç
+            selected = []
+            used_groups = set()
+            
+            for s in sorted_scores:
+                base_name = get_base_indicator(s.name)
+                
+                if base_name not in used_groups:
+                    selected.append(s)
+                    used_groups.add(base_name)
+                    
+                    if len(selected) >= 2:
+                        break
+            
+            if selected:
+                active[cat] = [s.name for s in selected]
+                for s in selected:
+                    ic_details[s.name] = s.ic_mean
         
-        return active
+        # EN GÜÇLÜ indikatörü kategorisine ekle (eğer zaten yoksa)
+        if top_indicator:
+            top_cat = top_indicator.category.lower() if top_indicator.category else 'other'
+            if top_cat in valid_categories:
+                if top_cat not in active:
+                    active[top_cat] = []
+                
+                # Zaten listede mi kontrol et
+                if top_indicator.name not in active[top_cat]:
+                    # En başa ekle (en güçlü olduğu için)
+                    active[top_cat].insert(0, top_indicator.name)
+                    ic_details[top_indicator.name] = top_indicator.ic_mean
+                    
+                    # Max 3'e çıkmasın, gerekirse sonuncuyu sil
+                    if len(active[top_cat]) > 2:
+                        removed = active[top_cat].pop()
+                        if removed in ic_details and removed != top_indicator.name:
+                            del ic_details[removed]
+        
+        return active, ic_details
     
-    def _generate_notes(self, result: BacktestResult) -> str:
-        """Uyarı notları oluşturur."""
-        
+    def _generate_notes_ic_based(self, timeframe: str) -> str:
+        """IC bazlı notlar oluşturur."""
         notes = []
         
-        if result:
-            if result.sharpe_ratio < 0:
-                notes.append("⚠️ Negatif Sharpe - dikkatli olun")
-            if result.max_drawdown < -15:
-                notes.append("⚠️ Yüksek drawdown riski")
-            if result.win_rate < 50:
-                notes.append("⚠️ Düşük win rate")
+        if timeframe in self.indicator_scores:
+            scores = self.indicator_scores[timeframe]
+            significant = [s for s in scores if abs(s.ic_mean) > 0.02 and not np.isnan(s.ic_mean)]
+            
+            if significant:
+                # Baskın yön analizi
+                positive = sum(1 for s in significant if s.ic_mean > 0)
+                negative = sum(1 for s in significant if s.ic_mean < 0)
+                
+                if negative > positive * 2:
+                    notes.append("📉 İndikatörler güçlü SHORT yönünde")
+                elif positive > negative * 2:
+                    notes.append("📈 İndikatörler güçlü LONG yönünde")
+                elif abs(positive - negative) <= 2:
+                    notes.append("↔️ Karışık sinyal - dikkatli ol")
+                
+                # En güçlü IC
+                top_ic = max(significant, key=lambda x: abs(x.ic_mean))
+                if abs(top_ic.ic_mean) > 0.10:
+                    notes.append(f"⭐ En güçlü: {top_ic.name.split('_')[0]}")
         
         if self.timeframe_ranking:
             if self.timeframe_ranking.market_regime == 'volatile':
-                notes.append("⚡ Yüksek volatilite - pozisyon boyutunu küçült")
+                notes.append("⚡ Yüksek volatilite")
             elif self.timeframe_ranking.market_regime == 'transitioning':
-                notes.append("🔄 Geçiş dönemi - net trend yok")
+                notes.append("🔄 Geçiş dönemi")
         
         return " | ".join(notes) if notes else ""
+    
+    def _determine_direction(self, timeframe: str) -> str:
+        """
+        Sinyal yönünü belirler - tüm ana kategorilerdeki IC'lere bakarak.
+        
+        Mantık:
+        - Tüm anlamlı IC'lerin ağırlıklı ortalaması
+        - Negatif IC çoğunlukta (2:1) → SHORT
+        - Pozitif IC çoğunlukta (2:1) → LONG
+        """
+        
+        if timeframe not in self.indicator_scores:
+            return "NEUTRAL"
+        
+        scores = self.indicator_scores[timeframe]
+        
+        # Sadece ana kategorilerdeki anlamlı IC'ler (|IC| > 0.02)
+        valid_categories = ['trend', 'momentum', 'volatility', 'volume']
+        significant = [s for s in scores 
+                      if abs(s.ic_mean) > 0.02 
+                      and not np.isnan(s.ic_mean)
+                      and s.category in valid_categories]
+        
+        if not significant:
+            return "NEUTRAL"
+        
+        # Pozitif ve negatif IC sayısı
+        positive_count = sum(1 for s in significant if s.ic_mean > 0)
+        negative_count = sum(1 for s in significant if s.ic_mean < 0)
+        
+        # Ağırlıklı ortalama IC (|IC| ağırlık olarak)
+        total_weight = sum(abs(s.ic_mean) for s in significant)
+        if total_weight > 0:
+            weighted_ic = sum(s.ic_mean * abs(s.ic_mean) for s in significant) / total_weight
+        else:
+            weighted_ic = 0
+        
+        # Karar mantığı:
+        # 2:1 oran ve ağırlıklı IC aynı yönde → o yön
+        # Not ile tutarlı olması için aynı eşik (2x)
+        if negative_count > positive_count * 2 and weighted_ic < -0.02:
+            return "SHORT"
+        elif positive_count > negative_count * 2 and weighted_ic > 0.02:
+            return "LONG"
+        else:
+            return "NEUTRAL"
+    
+    # _get_active_indicators ve _generate_notes fonksiyonları
+    # _get_active_indicators_with_ic ve _generate_notes_ic_based ile değiştirildi
     
     # =========================================================================
     # ADIM 6: TELEGRAM BİLDİRİMİ
