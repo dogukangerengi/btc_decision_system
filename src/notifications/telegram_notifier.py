@@ -98,6 +98,7 @@ class TelegramNotifier:
     }
     
     INDICATOR_NAMES = {
+        'COPC_11_14_10': 'Coppock',
         'SUPERTs_10_3.0': 'Supertrend', 'SUPERTl_10_3.0': 'Supertrend',
         'SUPERTd_10_3.0': 'Supertrend', 'SUPERT_10_3.0': 'Supertrend',
         'EMA_12': 'EMA (12)', 'EMA_20': 'EMA (20)', 'EMA_26': 'EMA (26)', 'EMA_50': 'EMA (50)',

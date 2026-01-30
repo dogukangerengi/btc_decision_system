@@ -1,15 +1,15 @@
 # 🚀 BTC Dinamik Karar Destek Sistemi
 
-Bitcoin için saatlik çalışan, istatistiksel olarak güçlü bir trading karar destek sistemi.
+Bitcoin için saatlik çalışan, IC (Information Coefficient) bazlı istatistiksel trading karar destek sistemi.
 
 ## 📋 Özellikler
 
 - **Multi-Timeframe Analiz**: 5m, 15m, 30m, 1h, 2h, 4h
 - **60+ Teknik İndikatör**: Trend, Momentum, Volatilite, Hacim
-- **İstatistiksel Seçim**: Information Coefficient, p-value, FDR correction
+- **IC Bazlı İstatistiksel Seçim**: Spearman korelasyonu, p-value, FDR correction
+- **Dinamik Güven Skoru**: Piyasa rejimine göre otomatik ayarlanan sinyal gücü
 - **Walk-Forward Backtest**: Out-of-sample validation, overfitting önleme
-- **Risk Metrikleri**: Sharpe, Sortino, Calmar, Max Drawdown
-- **Telegram Bildirimleri**: Formatlı analiz raporları
+- **Telegram Bildirimleri**: IC değerleri ile formatlı analiz raporları
 
 ## 🏗️ Proje Yapısı
 
@@ -19,20 +19,25 @@ btc_decision_system/
 │   ├── main.py                 # Ana orkestrasyon
 │   ├── data/
 │   │   ├── __init__.py
-│   │   └── fetcher.py          # Binance veri çekme
+│   │   ├── fetcher.py          # Binance veri çekme
+│   │   └── preprocessor.py     # Veri ön işleme
 │   ├── indicators/
 │   │   ├── __init__.py
 │   │   ├── categories.py       # İndikatör tanımları
 │   │   ├── calculator.py       # İndikatör hesaplama
-│   │   └── selector.py         # İstatistiksel seçim
+│   │   └── selector.py         # İstatistiksel seçim (IC)
 │   ├── backtest/
 │   │   ├── __init__.py
 │   │   └── backtester.py       # Walk-forward backtest
 │   └── notifications/
 │       ├── __init__.py
 │       └── telegram_notifier.py # Telegram bildirimleri
+├── config/
+│   └── settings.yaml           # Yapılandırma dosyası
+├── logs/                       # Log dosyaları
 ├── .env                        # API anahtarları (oluşturulacak)
 ├── requirements.txt
+├── setup_scheduler.sh          # Otomatik çalışma scripti
 └── README.md
 ```
 
@@ -41,7 +46,8 @@ btc_decision_system/
 ### 1. Kurulum
 
 ```bash
-# Projeyi klonla veya indir
+# Projeyi klonla
+git clone https://github.com/kullanici/btc_decision_system.git
 cd btc_decision_system
 
 # Sanal ortam oluştur ve aktifle
@@ -71,33 +77,115 @@ python main.py --interval 30
 python main.py --no-telegram
 ```
 
+### 3. Otomatik Çalışma (macOS LaunchAgent)
+
+```bash
+# Kurulum
+./setup_scheduler.sh install
+
+# Durum kontrolü
+./setup_scheduler.sh status
+
+# Manuel çalıştırma
+./setup_scheduler.sh run
+
+# Telegram testi
+./setup_scheduler.sh test
+
+# Kaldırma
+./setup_scheduler.sh uninstall
+```
+
 ## 📊 Örnek Çıktı
 
 ```
 🔔 BTC/USDT ANALİZ RAPORU
 ━━━━━━━━━━━━━━━━━━━━━━━
 
-💰 Fiyat: $89,602.24
-⏰ Zaman: 2026-01-25 23:04 UTC
+💰 Fiyat: $104,250.00
+⏰ Zaman: 2026-01-30 14:00 UTC
 
-📊 ÖNERİLEN TIMEFRAME: 2h
-🔄 Piyasa Rejimi: transitioning
-🔴 Sinyal: SHORT
-🎯 Güven Skoru: 76/100 🟢🟢🟢
+📊 ÖNERİLEN TIMEFRAME: 30m
+↔️ Piyasa Rejimi: ranging
+🔴 Baskın Yön: SHORT
+🎯 Sinyal Gücü: 61/100 🟡🟡
 
 📈 AKTİF İNDİKATÖRLER:
-• Trend: SUPERTs_10_3.0, TEMA_20
-• Momentum: CCI, WILLR, RSI
-• Volume: PVT, OBV, AD
+📊 Trend: Aroon Down (+0.13), Supertrend (-0.10)
+⚡ Momentum: Coppock (-0.18), ROC (20) (-0.15)
+📉 Volatility: UI (+0.13), Bollinger Bands (-0.12)
+📶 Volume: CMF (20) (-0.18), Chaikin Osc (-0.14)
 
-⚠️ RİSK METRİKLERİ:
-• Sharpe Ratio: 1.53 ✅
-• Max Drawdown: -10.3% ⚠️
-• Win Rate: 53.4% ⚠️
+📝 Not: 📉 İndikatörler güçlü SHORT yönünde | ⭐ En güçlü: COPC
 
 ━━━━━━━━━━━━━━━━━━━━━━━
 🤖 BTC Decision System v1.0
 ```
+
+## 🔬 İstatistiksel Metodoloji
+
+### Information Coefficient (IC)
+
+```
+IC = Spearman(indicator_t, return_{t+n})
+```
+
+- **Spearman korelasyonu**: Rank-based, outlier'lara robust
+- **|IC| > 0.02**: Ekonomik olarak anlamlı
+- **IC > 0**: İndikatör yükselince fiyat yükselir (LONG)
+- **IC < 0**: İndikatör yükselince fiyat düşer (SHORT)
+
+### Güven Skoru Hesaplama
+
+Güven skoru üç faktörden oluşur:
+
+| Faktör | Ağırlık | Açıklama |
+|--------|---------|----------|
+| Anlamlı İndikatör Sayısı | 30 puan | Daha fazla = daha güvenilir |
+| Ortalama \|IC\| | 40 puan | Daha yüksek = daha güçlü sinyal |
+| IC Tutarlılığı | 30 puan | Aynı yönde = daha net sinyal |
+
+### Piyasa Rejimi Ayarlaması
+
+| Rejim | Çarpan | Açıklama |
+|-------|--------|----------|
+| Trending (up/down) | 1.00 | Trend sinyalleri güvenilir |
+| Transitioning | 0.85 | Belirsizlik var |
+| Ranging | 0.75 | Trend sinyalleri yanıltıcı |
+| Volatile | 0.70 | Her sinyal riskli |
+
+### Multiple Testing Correction
+
+```
+Benjamini-Hochberg FDR: p_adjusted = p * (n / rank)
+```
+
+- 60+ indikatör test ediliyor
+- FDR correction ile yanlış pozitif oranı kontrol altında
+
+### Walk-Forward Validation
+
+```
+[=== Train ===][Test]
+    [=== Train ===][Test]
+        [=== Train ===][Test]
+```
+
+- Overfitting önleme
+- Out-of-sample performans ölçümü
+- Gerçek dünya simülasyonu
+
+## 📈 IC Değeri Yorumlama
+
+| IC Aralığı | Anlam | Aksiyon |
+|------------|-------|---------|
+| > +0.10 | Çok güçlü pozitif | Güçlü LONG sinyali |
+| +0.05 to +0.10 | Güçlü pozitif | LONG sinyali |
+| +0.02 to +0.05 | Zayıf pozitif | Hafif LONG eğilimi |
+| -0.02 to +0.02 | Anlamsız | Sinyal yok |
+| -0.05 to -0.02 | Zayıf negatif | Hafif SHORT eğilimi |
+| -0.10 to -0.05 | Güçlü negatif | SHORT sinyali |
+| < -0.10 | Çok güçlü negatif | Güçlü SHORT sinyali |
 
 ## 🔧 Telegram Kurulumu (Opsiyonel)
 
@@ -113,48 +201,51 @@ python main.py --no-telegram
 3. `"chat":{"id": XXXXXX}` kısmındaki sayıyı kopyala
 
 ### 3. .env Dosyası
+
 ```bash
 # .env dosyası oluştur
-echo "TELEGRAM_BOT_TOKEN=your_token_here" >> .env
-echo "TELEGRAM_CHAT_ID=your_chat_id_here" >> .env
+cat > .env << EOF
+TELEGRAM_BOT_TOKEN=your_token_here
+TELEGRAM_CHAT_ID=your_chat_id_here
+EOF
 ```
 
-## 📈 Metrik Yorumlama
+## 🎯 Sistem Özellikleri
 
-| Metrik | İyi | Orta | Kötü |
-|--------|-----|------|------|
-| Sharpe Ratio | > 1.0 | 0 - 1.0 | < 0 |
-| Sortino Ratio | > 1.5 | 0.5 - 1.5 | < 0.5 |
-| Max Drawdown | > -10% | -10% to -20% | < -20% |
-| Win Rate | > 55% | 50% - 55% | < 50% |
-| IC (Information Coefficient) | > 0.05 | 0.02 - 0.05 | < 0.02 |
+### Otomatik En Güçlü İndikatör Seçimi
 
-## 🔬 İstatistiksel Metodoloji
+Sistem, tüm kategoriler arasından en yüksek |IC| değerine sahip indikatörü otomatik olarak ilgili kategoriye ekler. Bu sayede en güçlü sinyal her zaman görünür.
 
-### Information Coefficient (IC)
-```
-IC = Spearman(indicator_t, return_{t+n})
-```
-- Rank-based korelasyon (outlier'lara robust)
-- |IC| > 0.02: Ekonomik olarak anlamlı
-- Multiple testing correction: Benjamini-Hochberg FDR
+### Duplicate Filtreleme
 
-### Walk-Forward Validation
-```
-[=== Train ===][Test]
-    [=== Train ===][Test]
-        [=== Train ===][Test]
-```
-- Overfitting önleme
-- Out-of-sample performans ölçümü
-- Gerçek dünya simülasyonu
+Aynı indikatör grubunun farklı çıktıları (örn: MACD, MACDh, MACDs) tek bir indikatör olarak sayılır. Her kategoriden gerçekten farklı 2 indikatör seçilir.
+
+### Rejim Bazlı Güven Ayarlaması
+
+Ranging veya volatile piyasalarda trend sinyalleri otomatik olarak düşük güvenle işaretlenir. Bu, yanıltıcı sinyallerin önüne geçer.
 
 ## ⚠️ Uyarılar
 
 1. **Yatırım tavsiyesi değildir** - Karar destek sistemidir
-2. **Geçmiş performans gelecek sonuçları garanti etmez**
-3. **Risk yönetimi sizin sorumluluğunuzdadır**
-4. **Paper trading ile test edin**
+2. **IC değerleri göreceli performans gösterir** - Mutlak başarı garantisi değil
+3. **Geçmiş performans gelecek sonuçları garanti etmez**
+4. **Risk yönetimi sizin sorumluluğunuzdadır**
+5. **Paper trading ile test edin**
+
+## 🔄 Güncelleme Geçmişi
+
+### v1.1.0 (Ocak 2026)
+- IC bazlı güven skoru sistemi
+- Piyasa rejimine göre otomatik güven ayarlaması
+- En güçlü indikatör otomatik ekleme
+- Duplicate indikatör filtreleme
+- Telegram'da IC değerleri gösterimi
+
+### v1.0.0 (Ocak 2026)
+- İlk sürüm
+- Multi-timeframe analiz
+- Walk-forward backtest
+- Telegram bildirimleri
 
 ## 📝 Lisans
 
@@ -163,5 +254,5 @@ MIT License - Kişisel kullanım için serbesttir.
 ---
 
 **Geliştirici**: Doğukan Gerengi  
-**Versiyon**: 1.0.0  
+**Versiyon**: 1.1.0  
 **Son Güncelleme**: Ocak 2026
