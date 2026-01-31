@@ -7,9 +7,13 @@
 # 1. Veri Çekme (DataFetcher) - Multi-timeframe OHLCV
 # 2. İndikatör Hesaplama (IndicatorCalculator) - 60+ indikatör
 # 3. İstatistiksel Seçim (IndicatorSelector) - IC, p-value, FDR
-# 4. Dinamik Backtest (DynamicBacktester) - Walk-forward validation
-# 5. Timeframe Seçimi - Composite scoring
-# 6. Rapor Oluşturma - Telegram bildirimi
+# 4. IC Bazlı Timeframe Seçimi - Karar destek için optimize
+# 5. Rapor Oluşturma - Telegram bildirimi
+#
+# v1.2.0 Güncelleme:
+# - Backtest bazlı TF seçimi → IC bazlı TF seçimi
+# - Karar destek sistemine uygun metrikler
+# - Sharpe/WinRate yerine IC gücü ve tutarlılığı
 #
 # Çalışma Modu:
 # - Tek seferlik: python main.py
@@ -24,6 +28,7 @@ import logging
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
 import pandas as pd
 import numpy as np
 
@@ -63,7 +68,6 @@ for subdir in ['data', 'indicators', 'backtest', 'notifications']:
 from fetcher import DataFetcher
 from calculator import IndicatorCalculator
 from selector import IndicatorSelector, IndicatorScore
-from backtester import DynamicBacktester, BacktestResult, TimeframeRanking
 from telegram_notifier import TelegramNotifier, AnalysisReport
 
 # =============================================================================
@@ -76,6 +80,34 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# IC BAZLI TF SIRALAMA DATACLASS
+# =============================================================================
+
+@dataclass
+class ICTimeframeScore:
+    """Bir timeframe'in IC bazlı skoru."""
+    timeframe: str
+    top_ic: float                    # En güçlü |IC| değeri
+    top_ic_indicator: str            # En güçlü IC'ye sahip indikatör
+    avg_ic: float                    # Ortalama |IC|
+    significant_count: int           # Anlamlı indikatör sayısı (|IC| > 0.02)
+    total_count: int                 # Toplam test edilen indikatör
+    consistency: float               # IC tutarlılığı (0-1, aynı yönde olanların oranı)
+    dominant_direction: str          # Baskın yön: 'LONG', 'SHORT', 'NEUTRAL'
+    composite_score: float           # Toplam skor (0-100)
+    market_regime: str               # Piyasa rejimi
+
+
+@dataclass
+class ICTimeframeRanking:
+    """IC bazlı timeframe sıralaması."""
+    rankings: List[ICTimeframeScore]     # Sıralı TF skorları
+    best_timeframe: str                   # En iyi TF
+    market_regime: str                    # Genel piyasa rejimi
+    confidence: float                     # Seçim güveni (0-100)
 
 
 # =============================================================================
@@ -106,10 +138,11 @@ class Config:
     SELECTOR_METHOD = 'fdr'            # Multiple testing correction
     MAX_INDICATORS_PER_CATEGORY = 2    # Kategori başına max indikatör
     
-    # Backtest parametreleri
-    BACKTEST_TRAIN_RATIO = 0.7         # %70 train, %30 test
-    BACKTEST_N_WALKS = 5               # Walk-forward adım sayısı
-    BACKTEST_MIN_TRADES = 30           # Minimum işlem sayısı
+    # IC bazlı TF seçim ağırlıkları
+    IC_WEIGHT_TOP_IC = 0.40            # En güçlü IC ağırlığı
+    IC_WEIGHT_AVG_IC = 0.25            # Ortalama IC ağırlığı
+    IC_WEIGHT_COUNT = 0.15             # Anlamlı indikatör sayısı ağırlığı
+    IC_WEIGHT_CONSISTENCY = 0.20       # Tutarlılık ağırlığı
     
     # Forward return hedefi (IC hesabı için)
     FORWARD_RETURN_PERIODS = [1, 5, 10, 20]
@@ -131,6 +164,8 @@ class BTCDecisionSystem:
     BTC Dinamik Karar Destek Sistemi.
     
     Tüm analiz pipeline'ını yöneten ana sınıf.
+    
+    v1.2.0: IC bazlı TF seçimi (karar destek için optimize)
     """
     
     def __init__(self, config: Config = None, verbose: bool = True):
@@ -155,23 +190,15 @@ class BTCDecisionSystem:
             correction_method=self.config.SELECTOR_METHOD,
             verbose=False
         )
-        self.backtester = DynamicBacktester(
-            train_ratio=self.config.BACKTEST_TRAIN_RATIO,
-            n_walks=self.config.BACKTEST_N_WALKS,
-            min_trades=self.config.BACKTEST_MIN_TRADES,
-            verbose=False
-        )
         self.notifier = TelegramNotifier()
         
         # Sonuçlar
         self.data_dict: Dict[str, pd.DataFrame] = {}
         self.indicator_scores: Dict[str, List[IndicatorScore]] = {}
-        self.backtest_results: List[BacktestResult] = []
-        self.timeframe_ranking: TimeframeRanking = None
-        self.best_indicators: Dict[str, List[IndicatorScore]] = {}
+        self.ic_ranking: ICTimeframeRanking = None
         self.current_price: float = 0.0
         
-        logger.info(f"BTCDecisionSystem başlatıldı - {self.config.SYMBOL}")
+        logger.info(f"BTCDecisionSystem v1.2.0 başlatıldı - {self.config.SYMBOL}")
     
     # =========================================================================
     # ADIM 1: VERİ ÇEKME
@@ -197,7 +224,7 @@ class BTCDecisionSystem:
                 bars = params['bars']
                 logger.info(f"  {tf}: {bars} bar çekiliyor...")
                 
-                df = self.fetcher.fetch_max_ohlcv(timeframe=tf, max_bars=bars)
+                df = self.fetcher.fetch_max_ohlcv(timeframe=tf, max_bars=bars, progress=False)
                 
                 if df is not None and len(df) > 100:
                     self.data_dict[tf] = df
@@ -283,7 +310,7 @@ class BTCDecisionSystem:
             Başarılı ise True
         """
         logger.info("\n" + "=" * 60)
-        logger.info("ADIM 3: İSTATİSTİKSEL İNDİKATÖR SEÇİMİ")
+        logger.info("ADIM 3: İSTATİSTİKSEL İNDİKATÖR SEÇİMİ (IC Analizi)")
         logger.info("=" * 60)
         
         target_col = f'fwd_ret_{self.config.TARGET_PERIOD}'
@@ -300,21 +327,14 @@ class BTCDecisionSystem:
                 
                 self.indicator_scores[tf] = scores
                 
-                # En iyileri seç
-                best = self.selector.select_best_indicators(
-                    scores,
-                    max_per_category=self.config.MAX_INDICATORS_PER_CATEGORY,
-                    only_significant=False  # Düşük volatilite dönemlerinde bile sinyal al
-                )
-                
                 # Anlamlı indikatör sayısı
-                significant = sum(1 for s in scores if s.is_significant)
-                logger.info(f"  {tf}: ✓ {significant}/{len(scores)} anlamlı indikatör")
+                significant = [s for s in scores if abs(s.ic_mean) > 0.02 and not np.isnan(s.ic_mean)]
+                logger.info(f"  {tf}: ✓ {len(significant)}/{len(scores)} anlamlı indikatör")
                 
                 # En güçlü IC'yi logla
-                if scores:
-                    top_ic = max(scores, key=lambda x: abs(x.ic_mean) if not np.isnan(x.ic_mean) else 0)
-                    logger.info(f"  {tf}: En güçlü IC: {top_ic.name} = {top_ic.ic_mean:.4f}")
+                if significant:
+                    top_ic = max(significant, key=lambda x: abs(x.ic_mean))
+                    logger.info(f"  {tf}: En güçlü IC: {top_ic.name} = {top_ic.ic_mean:+.4f}")
                 
             except Exception as e:
                 logger.error(f"  {tf}: ✗ Hata - {e}")
@@ -322,18 +342,20 @@ class BTCDecisionSystem:
         return True
     
     # =========================================================================
-    # ADIM 4: DİNAMİK BACKTEST (Multi-Indicator Composite)
+    # ADIM 4: IC BAZLI TİMEFRAME SEÇİMİ
     # =========================================================================
     
-    def run_backtests(self) -> bool:
+    def select_timeframe_by_ic(self) -> bool:
         """
-        Tüm timeframe'ler için IC-based composite backtest yapar.
+        IC değerlerine göre en uygun timeframe'i seçer.
         
-        Yeni Mantık:
-        -----------
-        1. Her TF için IC analizi ile seçilen indikatörleri kullan
-        2. Multi-indicator composite sinyal üret
-        3. Walk-forward validation ile test et
+        Karar Destek İçin Optimize:
+        - Backtest performansı DEĞİL, sinyal gücü önemli
+        - En güçlü |IC| = En güvenilir indikatörler
+        - Tutarlılık = Net yön (LONG veya SHORT)
+        
+        Skor Formülü:
+        Score = (top_ic × 40) + (avg_ic × 25) + (count × 15) + (consistency × 20)
         
         Returns:
         -------
@@ -341,59 +363,179 @@ class BTCDecisionSystem:
             Başarılı ise True
         """
         logger.info("\n" + "=" * 60)
-        logger.info("ADIM 4: DİNAMİK BACKTEST (Multi-Indicator)")
+        logger.info("ADIM 4: IC BAZLI TİMEFRAME SEÇİMİ")
         logger.info("=" * 60)
         
-        self.backtest_results = []
+        tf_scores: List[ICTimeframeScore] = []
         
-        try:
-            for tf, df in self.data_dict.items():
-                # Bu TF için IC skorlarını al
-                scores = self.indicator_scores.get(tf, [])
-                
-                if not scores:
-                    logger.warning(f"  {tf}: IC skorları bulunamadı, atlanıyor")
-                    continue
-                
-                # Kullanılan indikatörleri logla
-                best_inds = self.backtester._select_best_for_signal(scores)
-                ind_names = [x[0] for x in best_inds[:4]]  # İlk 4 tanesini göster
-                logger.info(f"  {tf}: Composite sinyal → {', '.join(ind_names)}...")
-                
-                # Composite backtest yap
-                result = self.backtester.run_composite_backtest(
-                    df=df,
-                    indicator_scores=scores,
-                    timeframe=tf,
-                    threshold=0.3  # Sinyal eşiği
-                )
-                
-                self.backtest_results.append(result)
-                
-                logger.info(f"  {tf}: Sharpe={result.sharpe_ratio:.2f} | "
-                           f"WR={result.win_rate:.1f}% | "
-                           f"DD={result.max_drawdown:.1f}%")
+        for tf, scores in self.indicator_scores.items():
+            if not scores:
+                continue
             
-            if not self.backtest_results:
-                logger.error("  Hiçbir TF için backtest yapılamadı!")
-                return False
+            # Sadece ana kategorilerdeki anlamlı IC'ler
+            valid_categories = ['trend', 'momentum', 'volatility', 'volume']
+            significant = [s for s in scores 
+                          if abs(s.ic_mean) > 0.02 
+                          and not np.isnan(s.ic_mean)
+                          and s.category in valid_categories]
             
-            # En iyi timeframe'i seç
-            self.timeframe_ranking = self.backtester.select_best_timeframe(
-                self.backtest_results
+            if not significant:
+                continue
+            
+            # === METRİKLER ===
+            
+            # 1. En güçlü IC
+            top_ic_score = max(significant, key=lambda x: abs(x.ic_mean))
+            top_ic = abs(top_ic_score.ic_mean)
+            top_ic_indicator = top_ic_score.name
+            
+            # 2. Ortalama |IC|
+            avg_ic = np.mean([abs(s.ic_mean) for s in significant])
+            
+            # 3. Anlamlı indikatör sayısı
+            significant_count = len(significant)
+            total_count = len(scores)
+            
+            # 4. Tutarlılık (aynı yönde olanların oranı)
+            positive_ic = sum(1 for s in significant if s.ic_mean > 0)
+            negative_ic = sum(1 for s in significant if s.ic_mean < 0)
+            consistency = max(positive_ic, negative_ic) / len(significant)
+            
+            # 5. Baskın yön
+            if negative_ic > positive_ic * 1.5:
+                dominant_direction = 'SHORT'
+            elif positive_ic > negative_ic * 1.5:
+                dominant_direction = 'LONG'
+            else:
+                dominant_direction = 'NEUTRAL'
+            
+            # 6. Piyasa rejimi (ADX bazlı)
+            market_regime = self._detect_regime(tf)
+            
+            # === COMPOSİTE SKOR ===
+            # Normalize et (0-100 arası)
+            
+            # Top IC: 0.02-0.40 arası → 0-100 puan
+            top_ic_norm = min((top_ic - 0.02) / 0.38 * 100, 100)
+            
+            # Avg IC: 0.02-0.15 arası → 0-100 puan
+            avg_ic_norm = min((avg_ic - 0.02) / 0.13 * 100, 100)
+            
+            # Count: 10-60 arası → 0-100 puan
+            count_norm = min(significant_count / 50 * 100, 100)
+            
+            # Consistency: 0.5-1.0 arası → 0-100 puan
+            consistency_norm = (consistency - 0.5) / 0.5 * 100
+            consistency_norm = max(0, min(consistency_norm, 100))
+            
+            # Ağırlıklı toplam
+            composite = (
+                top_ic_norm * self.config.IC_WEIGHT_TOP_IC +
+                avg_ic_norm * self.config.IC_WEIGHT_AVG_IC +
+                count_norm * self.config.IC_WEIGHT_COUNT +
+                consistency_norm * self.config.IC_WEIGHT_CONSISTENCY
             )
             
-            logger.info(f"\n  🏆 En iyi timeframe: {self.timeframe_ranking.best_timeframe}")
-            logger.info(f"  📊 Piyasa rejimi: {self.timeframe_ranking.market_regime}")
-            logger.info(f"  🎯 Güven: {self.timeframe_ranking.confidence:.0f}/100")
+            # Rejim bazlı ayarlama
+            if market_regime == 'ranging':
+                composite *= 0.85  # Ranging'de trend sinyalleri zayıf
+            elif market_regime == 'volatile':
+                composite *= 0.80  # Volatil'de belirsizlik yüksek
             
-            return True
+            tf_score = ICTimeframeScore(
+                timeframe=tf,
+                top_ic=top_ic,
+                top_ic_indicator=top_ic_indicator,
+                avg_ic=avg_ic,
+                significant_count=significant_count,
+                total_count=total_count,
+                consistency=consistency,
+                dominant_direction=dominant_direction,
+                composite_score=composite,
+                market_regime=market_regime
+            )
             
-        except Exception as e:
-            logger.error(f"  Backtest hatası: {e}")
-            import traceback
-            traceback.print_exc()
+            tf_scores.append(tf_score)
+            
+            logger.info(f"  {tf}: Top IC={top_ic:.3f} ({top_ic_indicator[:15]}) | "
+                       f"Avg={avg_ic:.3f} | N={significant_count} | "
+                       f"Dir={dominant_direction} | Skor={composite:.1f}")
+        
+        if not tf_scores:
+            logger.error("  Hiçbir TF için IC skoru hesaplanamadı!")
             return False
+        
+        # Composite skora göre sırala
+        tf_scores.sort(key=lambda x: x.composite_score, reverse=True)
+        
+        # En iyi TF
+        best = tf_scores[0]
+        
+        # Genel piyasa rejimi (çoğunluk)
+        regime_counts = {}
+        for ts in tf_scores:
+            regime_counts[ts.market_regime] = regime_counts.get(ts.market_regime, 0) + 1
+        overall_regime = max(regime_counts, key=regime_counts.get)
+        
+        # Ranking oluştur
+        self.ic_ranking = ICTimeframeRanking(
+            rankings=tf_scores,
+            best_timeframe=best.timeframe,
+            market_regime=overall_regime,
+            confidence=best.composite_score
+        )
+        
+        logger.info(f"\n  🏆 En iyi timeframe: {best.timeframe}")
+        logger.info(f"  📊 En güçlü IC: {best.top_ic:.4f} ({best.top_ic_indicator})")
+        logger.info(f"  🎯 Baskın yön: {best.dominant_direction}")
+        logger.info(f"  ↔️ Piyasa rejimi: {overall_regime}")
+        logger.info(f"  📈 Skor: {best.composite_score:.1f}/100")
+        
+        return True
+    
+    def _detect_regime(self, timeframe: str) -> str:
+        """
+        Piyasa rejimini tespit eder.
+        
+        ADX bazlı:
+        - ADX > 25: Trending
+        - ADX < 20: Ranging
+        - Else: Transitioning
+        """
+        if timeframe not in self.data_dict:
+            return 'unknown'
+        
+        df = self.data_dict[timeframe]
+        
+        # ADX kontrolü
+        if 'ADX_14' in df.columns:
+            adx = df['ADX_14'].iloc[-1]
+            dmp = df.get('DMP_14', pd.Series([50])).iloc[-1] if 'DMP_14' in df.columns else 50
+            dmn = df.get('DMN_14', pd.Series([50])).iloc[-1] if 'DMN_14' in df.columns else 50
+        else:
+            # ADX yoksa basit volatilite kontrolü
+            returns = df['close'].pct_change().tail(50)
+            vol = returns.std() * 100
+            if vol > 3:
+                return 'volatile'
+            elif vol < 1:
+                return 'ranging'
+            return 'transitioning'
+        
+        # ADX bazlı rejim
+        if adx > 25:
+            if dmp > dmn:
+                return 'trending_up'
+            else:
+                return 'trending_down'
+        elif adx < 20:
+            # Volatilite kontrolü
+            atr_col = 'ATRr_14' if 'ATRr_14' in df.columns else None
+            if atr_col and df[atr_col].iloc[-1] / df['close'].iloc[-1] > 0.03:
+                return 'volatile'
+            return 'ranging'
+        else:
+            return 'transitioning'
     
     # =========================================================================
     # ADIM 5: RAPOR OLUŞTURMA
@@ -404,8 +546,8 @@ class BTCDecisionSystem:
         Analiz raporu oluşturur.
         
         IC Bazlı Yaklaşım:
-        - Güven skoru: Anlamlı IC'lerin ortalaması ve tutarlılığı
-        - Risk metrikleri yerine IC değerleri gösterilir
+        - TF seçimi IC skoruna göre
+        - Güven skoru IC gücü ve tutarlılığına göre
         
         Returns:
         -------
@@ -416,19 +558,20 @@ class BTCDecisionSystem:
         logger.info("ADIM 5: RAPOR OLUŞTURMA")
         logger.info("=" * 60)
         
-        # En iyi TF
-        best_tf = self.timeframe_ranking.best_timeframe
+        # En iyi TF (IC bazlı seçim)
+        best_tf = self.ic_ranking.best_timeframe
+        best_score = self.ic_ranking.rankings[0]
         
-        # Sinyal yönü belirleme
-        direction = self._determine_direction(best_tf)
+        # Sinyal yönü (IC bazlı)
+        direction = best_score.dominant_direction
         
         # Aktif indikatörler ve IC değerleri
         active_indicators, indicator_details = self._get_active_indicators_with_ic(best_tf)
         
-        # IC bazlı güven skoru hesapla
+        # IC bazlı güven skoru
         confidence = self._calculate_ic_confidence(best_tf)
         
-        # Notlar (IC bazlı)
+        # Notlar
         notes = self._generate_notes_ic_based(best_tf)
         
         # Rapor oluştur
@@ -436,7 +579,7 @@ class BTCDecisionSystem:
             symbol=self.config.SYMBOL,
             price=self.current_price,
             recommended_timeframe=best_tf,
-            market_regime=self.timeframe_ranking.market_regime,
+            market_regime=self.ic_ranking.market_regime,
             direction=direction,
             confidence_score=confidence,
             active_indicators=active_indicators,
@@ -452,17 +595,6 @@ class BTCDecisionSystem:
     def _calculate_ic_confidence(self, timeframe: str) -> float:
         """
         IC bazlı güven skoru hesaplar.
-        
-        Faktörler:
-        - Anlamlı indikatör sayısı (daha fazla = daha güvenilir)
-        - Ortalama |IC| (daha yüksek = daha güçlü sinyal)
-        - IC tutarlılığı (aynı yönde mi?)
-        - Piyasa rejimi (ranging/volatile ise düşür)
-        
-        Returns:
-        -------
-        float
-            0-100 arası güven skoru
         """
         if timeframe not in self.indicator_scores:
             return 50.0
@@ -501,37 +633,22 @@ class BTCDecisionSystem:
         # Toplam (ham skor)
         total = count_score + ic_score + consistency_score
         
-        # 4. PİYASA REJİMİ AYARLAMASI
-        # Ranging veya volatile piyasada sinyal güvenilirliği düşer
-        if self.timeframe_ranking:
-            regime = self.timeframe_ranking.market_regime
+        # Piyasa rejimi ayarlaması
+        if self.ic_ranking:
+            regime = self.ic_ranking.market_regime
             
             if regime == 'ranging':
-                # Yatay piyasada trend sinyalleri güvenilir değil
-                total *= 0.75  # %25 düşür
+                total *= 0.75
             elif regime == 'volatile':
-                # Volatil piyasada her sinyal riskli
-                total *= 0.70  # %30 düşür
+                total *= 0.70
             elif regime == 'transitioning':
-                # Geçiş döneminde belirsizlik var
-                total *= 0.85  # %15 düşür
-            # trending_up veya trending_down ise ayarlama yok
+                total *= 0.85
         
         return min(max(total, 0), 100)
     
     def _get_active_indicators_with_ic(self, timeframe: str) -> Tuple[Dict[str, List[str]], Dict[str, float]]:
         """
         Aktif indikatörleri ve IC değerlerini döndürür.
-        
-        Özellikler:
-        - Her kategoriden max 2 FARKLI indikatör
-        - Aynı grubun farklı çıktıları filtrelenir (AROON, MACD, BB, vb.)
-        - EN GÜÇLÜ IC'ye sahip indikatör HER ZAMAN dahil edilir
-        
-        Returns:
-        -------
-        Tuple[Dict[str, List[str]], Dict[str, float]]
-            (kategori→indikatörler, indikatör→IC)
         """
         active = {}
         ic_details = {}
@@ -543,7 +660,6 @@ class BTCDecisionSystem:
         valid_categories = ['trend', 'momentum', 'volatility', 'volume']
         category_scores = {cat: [] for cat in valid_categories}
         
-        # Aynı grubun farklı çıktılarını grupla
         def get_base_indicator(name: str) -> str:
             """İndikatörün ana adını döndürür (duplicate önleme için)."""
             groups = {
@@ -563,7 +679,7 @@ class BTCDecisionSystem:
                 'FISHER': ['FISHERTs', 'FISHERT'],
                 'RVI': ['RVIs', 'RVI_'],
                 'QQE': ['QQEl', 'QQEs', 'QQE_'],
-                'COPC': ['COPC'],  # Coppock
+                'COPC': ['COPC'],
             }
             
             for group_name, patterns in groups.items():
@@ -583,7 +699,7 @@ class BTCDecisionSystem:
                 category_scores[cat].append(score)
                 all_significant.append(score)
         
-        # EN GÜÇLÜ indikatörü bul (tüm kategoriler dahil)
+        # EN GÜÇLÜ indikatörü bul
         top_indicator = None
         if all_significant:
             top_indicator = max(all_significant, key=lambda x: abs(x.ic_mean))
@@ -625,13 +741,10 @@ class BTCDecisionSystem:
                 if top_cat not in active:
                     active[top_cat] = []
                 
-                # Zaten listede mi kontrol et
                 if top_indicator.name not in active[top_cat]:
-                    # En başa ekle (en güçlü olduğu için)
                     active[top_cat].insert(0, top_indicator.name)
                     ic_details[top_indicator.name] = top_indicator.ic_mean
                     
-                    # Max 3'e çıkmasın, gerekirse sonuncuyu sil
                     if len(active[top_cat]) > 2:
                         removed = active[top_cat].pop()
                         if removed in ic_details and removed != top_indicator.name:
@@ -643,97 +756,39 @@ class BTCDecisionSystem:
         """IC bazlı notlar oluşturur."""
         notes = []
         
-        if timeframe in self.indicator_scores:
-            scores = self.indicator_scores[timeframe]
-            significant = [s for s in scores if abs(s.ic_mean) > 0.02 and not np.isnan(s.ic_mean)]
+        if self.ic_ranking and self.ic_ranking.rankings:
+            best = self.ic_ranking.rankings[0]
             
-            if significant:
-                # Baskın yön analizi
-                positive = sum(1 for s in significant if s.ic_mean > 0)
-                negative = sum(1 for s in significant if s.ic_mean < 0)
-                
-                if negative > positive * 2:
-                    notes.append("📉 İndikatörler güçlü SHORT yönünde")
-                elif positive > negative * 2:
-                    notes.append("📈 İndikatörler güçlü LONG yönünde")
-                elif abs(positive - negative) <= 2:
-                    notes.append("↔️ Karışık sinyal - dikkatli ol")
-                
-                # En güçlü IC
-                top_ic = max(significant, key=lambda x: abs(x.ic_mean))
-                if abs(top_ic.ic_mean) > 0.10:
-                    notes.append(f"⭐ En güçlü: {top_ic.name.split('_')[0]}")
+            # Yön gücü
+            if best.dominant_direction == 'SHORT' and best.consistency > 0.7:
+                notes.append("📉 İndikatörler güçlü SHORT yönünde")
+            elif best.dominant_direction == 'LONG' and best.consistency > 0.7:
+                notes.append("📈 İndikatörler güçlü LONG yönünde")
+            elif best.consistency < 0.6:
+                notes.append("↔️ Karışık sinyal - dikkatli ol")
+            
+            # En güçlü IC
+            if best.top_ic > 0.15:
+                ind_name = best.top_ic_indicator.split('_')[0]
+                notes.append(f"⭐ En güçlü: {ind_name} (IC={best.top_ic:.2f})")
         
-        if self.timeframe_ranking:
-            if self.timeframe_ranking.market_regime == 'volatile':
+        # Piyasa rejimi
+        if self.ic_ranking:
+            if self.ic_ranking.market_regime == 'volatile':
                 notes.append("⚡ Yüksek volatilite")
-            elif self.timeframe_ranking.market_regime == 'transitioning':
+            elif self.ic_ranking.market_regime == 'transitioning':
                 notes.append("🔄 Geçiş dönemi")
+            elif self.ic_ranking.market_regime == 'ranging':
+                notes.append("📊 Yatay piyasa")
         
         return " | ".join(notes) if notes else ""
-    
-    def _determine_direction(self, timeframe: str) -> str:
-        """
-        Sinyal yönünü belirler - tüm ana kategorilerdeki IC'lere bakarak.
-        
-        Mantık:
-        - Tüm anlamlı IC'lerin ağırlıklı ortalaması
-        - Negatif IC çoğunlukta (2:1) → SHORT
-        - Pozitif IC çoğunlukta (2:1) → LONG
-        """
-        
-        if timeframe not in self.indicator_scores:
-            return "NEUTRAL"
-        
-        scores = self.indicator_scores[timeframe]
-        
-        # Sadece ana kategorilerdeki anlamlı IC'ler (|IC| > 0.02)
-        valid_categories = ['trend', 'momentum', 'volatility', 'volume']
-        significant = [s for s in scores 
-                      if abs(s.ic_mean) > 0.02 
-                      and not np.isnan(s.ic_mean)
-                      and s.category in valid_categories]
-        
-        if not significant:
-            return "NEUTRAL"
-        
-        # Pozitif ve negatif IC sayısı
-        positive_count = sum(1 for s in significant if s.ic_mean > 0)
-        negative_count = sum(1 for s in significant if s.ic_mean < 0)
-        
-        # Ağırlıklı ortalama IC (|IC| ağırlık olarak)
-        total_weight = sum(abs(s.ic_mean) for s in significant)
-        if total_weight > 0:
-            weighted_ic = sum(s.ic_mean * abs(s.ic_mean) for s in significant) / total_weight
-        else:
-            weighted_ic = 0
-        
-        # Karar mantığı:
-        # 2:1 oran ve ağırlıklı IC aynı yönde → o yön
-        # Not ile tutarlı olması için aynı eşik (2x)
-        if negative_count > positive_count * 2 and weighted_ic < -0.02:
-            return "SHORT"
-        elif positive_count > negative_count * 2 and weighted_ic > 0.02:
-            return "LONG"
-        else:
-            return "NEUTRAL"
-    
-    # _get_active_indicators ve _generate_notes fonksiyonları
-    # _get_active_indicators_with_ic ve _generate_notes_ic_based ile değiştirildi
     
     # =========================================================================
     # ADIM 6: TELEGRAM BİLDİRİMİ
     # =========================================================================
     
     def send_notification(self, report: AnalysisReport) -> bool:
-        """
-        Telegram bildirimi gönderir.
-        
-        Returns:
-        -------
-        bool
-            Başarılı ise True
-        """
+        """Telegram bildirimi gönderir."""
         logger.info("\n" + "=" * 60)
         logger.info("ADIM 6: TELEGRAM BİLDİRİMİ")
         logger.info("=" * 60)
@@ -744,7 +799,7 @@ class BTCDecisionSystem:
         
         if not self.notifier.is_configured():
             logger.warning("  Telegram yapılandırılmamış (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)")
-            # Mesajı console'a yazdır
+            # Console'a yazdır
             print("\n" + "-" * 50)
             print("TELEGRAM MESAJI (yapılandırılmadığı için gönderilmedi):")
             print("-" * 50)
@@ -782,7 +837,7 @@ class BTCDecisionSystem:
         start_time = time.time()
         
         logger.info("\n" + "=" * 70)
-        logger.info(f"🚀 BTC DECISION SYSTEM - ANALİZ BAŞLADI")
+        logger.info(f"🚀 BTC DECISION SYSTEM v1.2.0 - ANALİZ BAŞLADI")
         logger.info(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info("=" * 70)
         
@@ -802,9 +857,9 @@ class BTCDecisionSystem:
                 logger.error("İndikatör seçimi başarısız!")
                 return None
             
-            # Adım 4: Backtest
-            if not self.run_backtests():
-                logger.error("Backtest başarısız!")
+            # Adım 4: IC bazlı TF seçimi
+            if not self.select_timeframe_by_ic():
+                logger.error("TF seçimi başarısız!")
                 return None
             
             # Adım 5: Rapor oluşturma
@@ -842,25 +897,25 @@ class BTCDecisionSystem:
         """Detaylı özet yazdırır."""
         
         print("\n" + "=" * 70)
-        print("DETAYLI ÖZET")
+        print("IC BAZLI TIMEFRAME SIRALAMASI")
         print("=" * 70)
         
-        # Backtest sonuçları tablosu
-        if self.backtest_results:
-            print("\n📊 TIMEFRAME KARŞILAŞTIRMA:")
-            summary = self.backtester.get_summary_table(self.backtest_results)
-            print(summary.to_string(index=False))
-        
-        # Timeframe sıralaması
-        if self.timeframe_ranking:
-            print("\n🏆 TIMEFRAME SIRALAMASSI:")
-            for tf, score in self.timeframe_ranking.rankings:
-                marker = "→" if tf == self.timeframe_ranking.best_timeframe else " "
-                print(f"  {marker} {tf}: {score:.1f} puan")
-        
-        # Öneri
-        if self.timeframe_ranking:
-            print("\n" + self.timeframe_ranking.recommendation)
+        if self.ic_ranking and self.ic_ranking.rankings:
+            print(f"\n{'TF':<6} {'Top IC':<10} {'Avg IC':<10} {'N':<6} {'Dir':<8} {'Rejim':<12} {'Skor':<8}")
+            print("-" * 70)
+            
+            for ts in self.ic_ranking.rankings:
+                marker = "→" if ts.timeframe == self.ic_ranking.best_timeframe else " "
+                print(f"{marker}{ts.timeframe:<5} {ts.top_ic:<10.4f} {ts.avg_ic:<10.4f} "
+                      f"{ts.significant_count:<6} {ts.dominant_direction:<8} "
+                      f"{ts.market_regime:<12} {ts.composite_score:<8.1f}")
+            
+            print("\n" + "=" * 70)
+            best = self.ic_ranking.rankings[0]
+            print(f"🏆 ÖNERİLEN: {best.timeframe}")
+            print(f"   En güçlü sinyal: {best.top_ic_indicator} (IC={best.top_ic:+.4f})")
+            print(f"   Baskın yön: {best.dominant_direction}")
+            print(f"   Güven skoru: {best.composite_score:.0f}/100")
 
 
 # =============================================================================
@@ -868,40 +923,25 @@ class BTCDecisionSystem:
 # =============================================================================
 
 def run_scheduler(system: BTCDecisionSystem, interval_minutes: int = 60):
-    """
-    Belirtilen aralıkla analizi tekrarlar.
-    
-    Parameters:
-    ----------
-    system : BTCDecisionSystem
-        Analiz sistemi
-    interval_minutes : int
-        Çalışma aralığı (dakika)
-    """
+    """Belirtilen aralıkla analizi tekrarlar."""
     logger.info(f"Scheduler başlatıldı - Her {interval_minutes} dakikada bir çalışacak")
     
     while True:
         try:
-            # Analizi çalıştır
             system.run_analysis()
             system.print_summary()
             
-            # Bir sonraki çalışmaya kadar bekle
             next_run = datetime.now() + timedelta(minutes=interval_minutes)
             logger.info(f"\n⏰ Sonraki çalışma: {next_run.strftime('%H:%M:%S')}")
             
-            # Saat başına hizala (opsiyonel)
-            # wait_seconds = (60 - datetime.now().minute) * 60 - datetime.now().second
-            wait_seconds = interval_minutes * 60
-            
-            time.sleep(wait_seconds)
+            time.sleep(interval_minutes * 60)
             
         except KeyboardInterrupt:
             logger.info("\nScheduler durduruldu (Ctrl+C)")
             break
         except Exception as e:
             logger.exception(f"Scheduler hatası: {e}")
-            time.sleep(60)  # Hata durumunda 1 dakika bekle
+            time.sleep(60)
 
 
 # =============================================================================
@@ -912,7 +952,7 @@ def main():
     """Ana giriş noktası."""
     
     parser = argparse.ArgumentParser(
-        description='BTC Dinamik Karar Destek Sistemi',
+        description='BTC Dinamik Karar Destek Sistemi v1.2.0',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Örnekler:
@@ -952,10 +992,8 @@ def main():
     system = BTCDecisionSystem(config=config, verbose=True)
     
     if args.schedule:
-        # Sürekli çalışma modu
         run_scheduler(system, interval_minutes=args.interval)
     else:
-        # Tek seferlik çalışma
         report = system.run_analysis()
         if report:
             system.print_summary()
