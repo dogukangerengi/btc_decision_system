@@ -981,12 +981,22 @@ def main():
         help='Telegram bildirimlerini devre dışı bırak'
     )
     
+    parser.add_argument(
+        '--symbol', '-sym',
+        type=str,
+        default='BTC/USDT',
+        help='İşlem çifti (varsayılan: BTC/USDT). Örnek: ETH/USDT, SOL/USDT'
+    )
+    
     args = parser.parse_args()
     
     # Yapılandırma
     config = Config()
     if args.no_telegram:
         config.TELEGRAM_ENABLED = False
+    
+    # Symbol değiştir
+    config.SYMBOL = args.symbol.upper()
     
     # Sistem oluştur
     system = BTCDecisionSystem(config=config, verbose=True)
