@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+import pandas as pd
 
 # Path ayarları
 CURRENT_DIR = Path(__file__).parent
@@ -103,14 +104,18 @@ def run_analysis(symbol: str) -> Optional[Dict]:
         calculator = IndicatorCalculator(verbose=False)
         selector = IndicatorSelector(alpha=0.05, correction_method='fdr', verbose=False)
         
-        # Güncel fiyat
+        # Güncel fiyat ve 24h bilgileri
         try:
             ticker = fetcher.get_latest_price()
             current_price = ticker['last']
             change_24h = ticker.get('change_24h', 0) or 0
+            high_24h = ticker.get('high_24h', 0) or 0
+            low_24h = ticker.get('low_24h', 0) or 0
         except:
             current_price = 0
             change_24h = 0
+            high_24h = 0
+            low_24h = 0
         
         tf_scores = []
         all_indicator_scores = {}
@@ -192,6 +197,9 @@ def run_analysis(symbol: str) -> Optional[Dict]:
         
         # Rejim
         regime = 'unknown'
+        atr_value = 0
+        atr_pct = 0
+        
         if best['tf'] in all_indicator_scores:
             scores = all_indicator_scores[best['tf']]
             adx_scores = [s for s in scores if 'ADX' in s.name]
@@ -202,10 +210,34 @@ def run_analysis(symbol: str) -> Optional[Dict]:
                 else:
                     regime = 'ranging'
         
+        # ATR değerini al (risk hesabı için)
+        if best['tf'] in all_indicator_scores:
+            # En son veriyi kullanarak ATR hesapla
+            try:
+                df = fetcher.fetch_ohlcv(timeframe=best['tf'], limit=20)
+                if df is not None and len(df) > 14:
+                    # ATR hesapla (14 periyot)
+                    high = df['high']
+                    low = df['low']
+                    close = df['close']
+                    
+                    tr1 = high - low
+                    tr2 = abs(high - close.shift(1))
+                    tr3 = abs(low - close.shift(1))
+                    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+                    atr_value = tr.rolling(14).mean().iloc[-1]
+                    atr_pct = (atr_value / current_price * 100) if current_price > 0 else 0
+            except:
+                pass
+        
         return {
             'symbol': f"{symbol}/USDT",
             'price': current_price,
             'change_24h': change_24h,
+            'high_24h': high_24h,
+            'low_24h': low_24h,
+            'atr': atr_value,
+            'atr_pct': atr_pct,
             'best_tf': best['tf'],
             'direction': best['direction'],
             'confidence': best['score'],
@@ -313,6 +345,33 @@ def format_analysis_message(result: Dict) -> str:
             marker = "→" if i == 0 else " "
             dir_mini = {'LONG': '🟢', 'SHORT': '🔴', 'NEUTRAL': '⚪'}.get(tf_info['direction'], '⚪')
             msg += f"{marker}{tf_info['tf']}: {tf_info['score']:.0f} {dir_mini}\n"
+        msg += "\n"
+    
+    # Risk bilgisi
+    atr_pct = result.get('atr_pct', 0)
+    atr = result.get('atr', 0)
+    high_24h = result.get('high_24h', 0)
+    low_24h = result.get('low_24h', 0)
+    price = result.get('price', 0)
+    
+    if atr_pct > 0:
+        stop_distance = atr * 1.5  # 1.5x ATR stop
+        
+        # Volatilite seviyesi
+        if atr_pct > 4:
+            vol_emoji = "🔴"
+            vol_text = "Yüksek"
+        elif atr_pct > 2:
+            vol_emoji = "🟡"
+            vol_text = "Normal"
+        else:
+            vol_emoji = "🟢"
+            vol_text = "Düşük"
+        
+        msg += f"""⚠️ <b>Risk Bilgisi:</b>
+{vol_emoji} Volatilite: %{atr_pct:.1f} ({vol_text})
+🛑 Stop Mesafesi: ${stop_distance:,.0f} (1.5x ATR)
+📏 24h Range: ${low_24h:,.0f} - ${high_24h:,.0f}"""
     
     return msg
 
