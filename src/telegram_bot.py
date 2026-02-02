@@ -48,7 +48,29 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 
-SUPPORTED_COINS = ['BTC', 'ETH', 'XRP', 'SOL', 'DOGE', 'ADA', 'AVAX', 'LINK', 'DOT', 'MATIC']
+def get_supported_coins() -> List[str]:
+    """Binance'daki tüm USDT çiftlerini döndürür."""
+    try:
+        import ccxt
+        exchange = ccxt.binance()
+        exchange.load_markets()
+        
+        # USDT çiftlerini filtrele
+        coins = []
+        for symbol in exchange.markets:
+            if symbol.endswith('/USDT') and ':' not in symbol:  # Spot only
+                coin = symbol.replace('/USDT', '')
+                coins.append(coin)
+        
+        return sorted(coins)
+    except Exception as e:
+        logger.error(f"Coin listesi alınamadı: {e}")
+        # Fallback liste
+        return ['BTC', 'ETH', 'XRP', 'SOL', 'DOGE', 'ADA', 'AVAX', 'LINK', 'DOT', 'MATIC']
+
+# Başlangıçta bir kez çek
+SUPPORTED_COINS = get_supported_coins()
+logger.info(f"Desteklenen coin sayısı: {len(SUPPORTED_COINS)}")
 
 # main.py ile aynı parametreler
 TIMEFRAMES = {
@@ -323,8 +345,21 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_liste(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    coins = " ".join(SUPPORTED_COINS)
-    msg = f"📋 <b>Desteklenen Coinler:</b>\n<code>{coins}</code>"
+    """Desteklenen coinleri listeler."""
+    total = len(SUPPORTED_COINS)
+    # İlk 30 tanesini göster
+    sample = ", ".join(SUPPORTED_COINS[:30])
+    msg = f"""📋 <b>Desteklenen Coinler</b>
+
+Toplam: <b>{total}</b> coin (Binance USDT çiftleri)
+
+<b>Örnekler:</b>
+<code>{sample}...</code>
+
+💡 Herhangi bir USDT çiftini analiz edebilirsin:
+<code>/analiz BTC</code>
+<code>/analiz PEPE</code>
+<code>/analiz ARB</code>"""
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
 
@@ -337,10 +372,15 @@ async def cmd_analiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
         symbol = 'BTC'
     
     if symbol not in SUPPORTED_COINS:
-        await update.message.reply_text(
-            f"❌ {symbol} desteklenmiyor.\n/liste ile desteklenen coinleri gör."
-        )
-        return
+        # Belki küçük/büyük harf sorunu vardır, tekrar kontrol et
+        symbol_check = symbol.upper()
+        if symbol_check not in SUPPORTED_COINS:
+            await update.message.reply_text(
+                f"❌ {symbol} Binance'da bulunamadı.\n"
+                f"Doğru yazdığından emin ol (örn: BTC, ETH, PEPE)"
+            )
+            return
+        symbol = symbol_check
     
     loading_msg = await update.message.reply_text(
         f"⏳ {symbol} analiz ediliyor (~30-60 saniye)..."
