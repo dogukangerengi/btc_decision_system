@@ -96,13 +96,85 @@ executor = ThreadPoolExecutor(max_workers=6)
 # ANALİZ FONKSİYONU
 # =============================================================================
 
+def fetch_single_tf(args):
+    """Tek TF için veri çeker (paralel kullanım için)."""
+    symbol, tf, bars = args
+    try:
+        fetcher = DataFetcher(symbol=f"{symbol}/USDT")
+        df = fetcher.fetch_max_ohlcv(timeframe=tf, max_bars=bars, progress=False)
+        return tf, df
+    except Exception as e:
+        logger.warning(f"{tf} veri çekme hatası: {e}")
+        return tf, None
+
+
+def analyze_single_tf(args):
+    """Tek TF için analiz yapar (paralel kullanım için)."""
+    tf, df, calculator, selector = args
+    try:
+        if df is None or len(df) < 200:
+            return tf, None
+        
+        df = calculator.calculate_all(df, categories=['trend', 'momentum', 'volatility', 'volume'])
+        df = calculator.add_forward_returns(df, periods=[1, 5, 10])
+        
+        scores = selector.evaluate_all_indicators(df, target_col='fwd_ret_5')
+        
+        significant = [s for s in scores 
+                      if abs(s.ic_mean) > 0.02 
+                      and s.category in ['trend', 'momentum', 'volatility', 'volume']]
+        
+        if not significant:
+            return tf, None
+        
+        top_ic = max(abs(s.ic_mean) for s in significant)
+        avg_ic = sum(abs(s.ic_mean) for s in significant) / len(significant)
+        
+        positive = sum(1 for s in significant if s.ic_mean > 0)
+        negative = sum(1 for s in significant if s.ic_mean < 0)
+        consistency = max(positive, negative) / len(significant)
+        
+        if negative > positive * 1.5:
+            direction = 'SHORT'
+        elif positive > negative * 1.5:
+            direction = 'LONG'
+        else:
+            direction = 'NEUTRAL'
+        
+        top_norm = min((top_ic - 0.02) / 0.38 * 100, 100)
+        avg_norm = min((avg_ic - 0.02) / 0.13 * 100, 100)
+        count_norm = min(len(significant) / 50 * 100, 100)
+        cons_norm = max(0, (consistency - 0.5) / 0.5 * 100)
+        
+        composite = (
+            top_norm * IC_WEIGHTS['top_ic'] +
+            avg_norm * IC_WEIGHTS['avg_ic'] +
+            count_norm * IC_WEIGHTS['count'] +
+            cons_norm * IC_WEIGHTS['consistency']
+        )
+        
+        return tf, {
+            'scores': scores,
+            'tf_score': {
+                'tf': tf,
+                'score': composite,
+                'direction': direction,
+                'top_ic': top_ic,
+                'avg_ic': avg_ic,
+                'count': len(significant),
+                'consistency': consistency
+            }
+        }
+    except Exception as e:
+        logger.warning(f"{tf} analiz hatası: {e}")
+        return tf, None
+
+
 def run_analysis(symbol: str) -> Optional[Dict]:
-    """Tek coin için tam IC analizi yapar."""
+    """Tek coin için tam IC analizi yapar (PARALEL)."""
     
     try:
         fetcher = DataFetcher(symbol=f"{symbol}/USDT")
-        calculator = IndicatorCalculator(verbose=False)
-        selector = IndicatorSelector(alpha=0.05, correction_method='fdr', verbose=False)
         
         # Güncel fiyat ve 24h bilgileri
         try:
@@ -117,67 +189,33 @@ def run_analysis(symbol: str) -> Optional[Dict]:
             high_24h = 0
             low_24h = 0
         
+        # PARALEL VERİ ÇEKME
+        fetch_args = [(symbol, tf, bars) for tf, bars in TIMEFRAMES.items()]
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            fetch_results = list(pool.map(fetch_single_tf, fetch_args))
+        
+        # Sonuçları dict'e çevir
+        tf_data = {tf: df for tf, df in fetch_results if df is not None}
+        
+        if not tf_data:
+            return None
+        
+        # PARALEL ANALİZ
+        calculator = IndicatorCalculator(verbose=False)
+        selector = IndicatorSelector(alpha=0.05, correction_method='fdr', verbose=False)
+        
+        analyze_args = [(tf, df, calculator, selector) for tf, df in tf_data.items()]
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            analyze_results = list(pool.map(analyze_single_tf, analyze_args))
+        
+        # Sonuçları topla
         tf_scores = []
         all_indicator_scores = {}
         
-        for tf, bars in TIMEFRAMES.items():
-            try:
-                df = fetcher.fetch_max_ohlcv(timeframe=tf, max_bars=bars, progress=False)
-                if df is None or len(df) < 200:
-                    continue
-                
-                df = calculator.calculate_all(df, categories=['trend', 'momentum', 'volatility', 'volume'])
-                df = calculator.add_forward_returns(df, periods=[1, 5, 10])
-                
-                scores = selector.evaluate_all_indicators(df, target_col='fwd_ret_5')
-                all_indicator_scores[tf] = scores
-                
-                significant = [s for s in scores 
-                              if abs(s.ic_mean) > 0.02 
-                              and s.category in ['trend', 'momentum', 'volatility', 'volume']]
-                
-                if not significant:
-                    continue
-                
-                top_ic = max(abs(s.ic_mean) for s in significant)
-                avg_ic = sum(abs(s.ic_mean) for s in significant) / len(significant)
-                
-                positive = sum(1 for s in significant if s.ic_mean > 0)
-                negative = sum(1 for s in significant if s.ic_mean < 0)
-                consistency = max(positive, negative) / len(significant)
-                
-                if negative > positive * 1.5:
-                    direction = 'SHORT'
-                elif positive > negative * 1.5:
-                    direction = 'LONG'
-                else:
-                    direction = 'NEUTRAL'
-                
-                top_norm = min((top_ic - 0.02) / 0.38 * 100, 100)
-                avg_norm = min((avg_ic - 0.02) / 0.13 * 100, 100)
-                count_norm = min(len(significant) / 50 * 100, 100)
-                cons_norm = max(0, (consistency - 0.5) / 0.5 * 100)
-                
-                composite = (
-                    top_norm * IC_WEIGHTS['top_ic'] +
-                    avg_norm * IC_WEIGHTS['avg_ic'] +
-                    count_norm * IC_WEIGHTS['count'] +
-                    cons_norm * IC_WEIGHTS['consistency']
-                )
-                
-                tf_scores.append({
-                    'tf': tf,
-                    'score': composite,
-                    'direction': direction,
-                    'top_ic': top_ic,
-                    'avg_ic': avg_ic,
-                    'count': len(significant),
-                    'consistency': consistency
-                })
-                
-            except Exception as e:
-                logger.warning(f"{tf} hatası: {e}")
-                continue
+        for tf, result in analyze_results:
+            if result is not None:
+                tf_scores.append(result['tf_score'])
+                all_indicator_scores[tf] = result['scores']
         
         if not tf_scores:
             return None
@@ -211,12 +249,10 @@ def run_analysis(symbol: str) -> Optional[Dict]:
                     regime = 'ranging'
         
         # ATR değerini al (risk hesabı için)
-        if best['tf'] in all_indicator_scores:
-            # En son veriyi kullanarak ATR hesapla
+        if best['tf'] in tf_data:
             try:
-                df = fetcher.fetch_ohlcv(timeframe=best['tf'], limit=20)
-                if df is not None and len(df) > 14:
-                    # ATR hesapla (14 periyot)
+                df = tf_data[best['tf']]
+                if len(df) > 14:
                     high = df['high']
                     low = df['low']
                     close = df['close']
@@ -302,6 +338,20 @@ def shorten_indicator(name: str) -> str:
     return name.split('_')[0][:8]
 
 
+def format_price(price: float) -> str:
+    """Fiyata göre dinamik format."""
+    if price >= 100:
+        return f"${price:,.2f}"
+    elif price >= 1:
+        return f"${price:.2f}"
+    elif price >= 0.01:
+        return f"${price:.4f}"
+    elif price >= 0.0001:
+        return f"${price:.6f}"
+    else:
+        return f"${price:.8f}"
+
+
 def format_analysis_message(result: Dict) -> str:
     """Analiz sonucunu Telegram mesajı olarak formatlar."""
     
@@ -319,8 +369,10 @@ def format_analysis_message(result: Dict) -> str:
     change = result.get('change_24h', 0)
     change_str = f"📈+{change:.1f}%" if change >= 0 else f"📉{change:.1f}%"
     
+    price_str = format_price(result['price'])
+    
     msg = f"""🔔 <b>{result['symbol']} ANALİZ</b>
-💰 Fiyat: ${result['price']:,.2f} ({change_str})
+💰 Fiyat: {price_str} ({change_str})
 📊 TF: {result['best_tf']} | {dir_emoji} {result['direction']}
 🎯 Güven: {conf:.0f}/100 {conf_bar}
 📍 Rejim: {regime_emoji} {result['regime']}
@@ -368,10 +420,24 @@ def format_analysis_message(result: Dict) -> str:
             vol_emoji = "🟢"
             vol_text = "Düşük"
         
+        # Fiyata göre dinamik format (düşük fiyatlı coinler için)
+        if price >= 100:
+            stop_str = f"${stop_distance:,.0f}"
+            range_str = f"${low_24h:,.0f} - ${high_24h:,.0f}"
+        elif price >= 1:
+            stop_str = f"${stop_distance:,.2f}"
+            range_str = f"${low_24h:,.2f} - ${high_24h:,.2f}"
+        elif price >= 0.01:
+            stop_str = f"${stop_distance:.4f}"
+            range_str = f"${low_24h:.4f} - ${high_24h:.4f}"
+        else:
+            stop_str = f"${stop_distance:.6f}"
+            range_str = f"${low_24h:.6f} - ${high_24h:.6f}"
+        
         msg += f"""⚠️ <b>Risk Bilgisi:</b>
 {vol_emoji} Volatilite: %{atr_pct:.1f} ({vol_text})
-🛑 Stop Mesafesi: ${stop_distance:,.0f} (1.5x ATR)
-📏 24h Range: ${low_24h:,.0f} - ${high_24h:,.0f}"""
+🛑 Stop Mesafesi: {stop_str} (1.5x ATR)
+📏 24h Range: {range_str}"""
     
     return msg
 
@@ -442,7 +508,7 @@ async def cmd_analiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
         symbol = symbol_check
     
     loading_msg = await update.message.reply_text(
-        f"⏳ {symbol} analiz ediliyor (~30-60 saniye)..."
+        f"⏳ {symbol} analiz ediliyor (~15-20 saniye)..."
     )
     
     try:
@@ -480,12 +546,17 @@ async def cmd_fiyat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         change_emoji = "📈" if change >= 0 else "📉"
         
+        # Dinamik fiyat formatı
+        price_str = format_price(price)
+        high_str = format_price(high) if high else "$0"
+        low_str = format_price(low) if low else "$0"
+        
         msg = f"""💰 <b>{symbol}/USDT</b>
 
-Fiyat: <code>${price:,.2f}</code>
+Fiyat: <code>{price_str}</code>
 24h: {change_emoji} {change:+.2f}%
-High: ${high:,.2f}
-Low: ${low:,.2f}"""
+High: {high_str}
+Low: {low_str}"""
         
         await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
         
